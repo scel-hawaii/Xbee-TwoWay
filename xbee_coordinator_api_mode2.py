@@ -1,8 +1,11 @@
 import serial
 from xbee import ZigBee
+from xbee.backend.base import TimeoutException
 import time
 import csv
 import msvcrt
+import threading
+import traceback
 
 SERIAL_PORT = 'COM8'  # Change this to match your system
 BAUD_RATE = 9600
@@ -21,17 +24,24 @@ print("XBee object created")
 router_address = None
 data_collection_active = False
 
+HEARTBEAT_INTERVAL = 30  # seconds
+STATUS_UPDATE_INTERVAL = 5  # seconds
+last_heartbeat_time = time.time()
+last_status_update = time.time()
 
 def send_message_to_router(message):
     if router_address:
         print(f"Sending to Router {router_address.hex()}: {message}")
-        xbee.tx(dest_addr_long=router_address, dest_addr=b'\xFF\xFE', data=message.encode('utf-8'))
+        try:
+            xbee.tx(dest_addr_long=router_address, data=message.encode('utf-8'))
+            print("Message sent successfully")
+        except Exception as e:
+            print(f"Error sending message: {e}")
     else:
         print("Router address not yet known. Cannot send message.")
 
-
 def receive_data():
-    global router_address, data_collection_active
+    global router_address, data_collection_active, last_status_update
     try:
         frame = xbee.wait_read_frame(timeout=1)
         if frame['id'] == 'rx':
@@ -50,8 +60,17 @@ def receive_data():
                 print("Received heartbeat acknowledgment.")
             else:
                 print(f"Received message: {message}")
+        elif frame['id'] != 'rx':
+            print(f"Received non-rx frame: {frame['id']}")
+    except TimeoutException:
+        # This is expected when no data is received
+        current_time = time.time()
+        if current_time - last_status_update >= STATUS_UPDATE_INTERVAL:
+            print("Waiting for router contact...")
+            last_status_update = current_time
     except Exception as e:
         print(f"Error in receive_data: {e}")
+        print(traceback.format_exc())
 
 def save_to_csv(data):
     try:
@@ -75,25 +94,13 @@ def process_command(command):
     else:
         print("Unknown command. Available commands: 'pause', 'start'")
 
-
-# Add this at the beginning of the script with other imports
-import threading
-
-# Add these variables after other global variables
-HEARTBEAT_INTERVAL = 30  # seconds
-last_heartbeat_time = 0
-
-
-# Add this function
 def send_heartbeat():
     global last_heartbeat_time
     current_time = time.time()
     if current_time - last_heartbeat_time >= HEARTBEAT_INTERVAL:
         send_message_to_router("heartbeat")
+        print("Heartbeat sent")
         last_heartbeat_time = current_time
-
-
-# Modify the main loop to include the heartbeat
 
 def check_for_input():
     if msvcrt.kbhit():
@@ -102,8 +109,10 @@ def check_for_input():
 
 try:
     print("XBee Coordinator running. Waiting for initial router contact...")
-    while not router_address:
+    while True:
         receive_data()
+        if router_address:
+            break
         time.sleep(0.1)
 
     print("Coordinator ready. Enter 'pause' or 'start' to control data collection.")
@@ -121,6 +130,7 @@ except KeyboardInterrupt:
     print("\nKeyboard interrupt received. Exiting...")
 except Exception as e:
     print(f"An error occurred: {e}")
+    print(traceback.format_exc())
 finally:
     xbee.halt()
     ser.close()
