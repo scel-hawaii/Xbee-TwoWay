@@ -1,4 +1,5 @@
 #include <XBee.h>
+#include <SoftwareSerial.h>
 
 XBee xbee = XBee();
 XBeeAddress64 coordinatorAddress = XBeeAddress64(0x0013A200, 0x409F7067);
@@ -8,68 +9,68 @@ bool isDataSendingActive = false;
 bool contactEstablished = false;
 const unsigned long initialContactInterval = 5000; // Try initial contact every 5 seconds
 unsigned long lastInitialContactAttempt = 0;
-const int maxRetries = 3;
 
 unsigned long lastStatusPrint = 0;
 const unsigned long statusPrintInterval = 5000;  // Print status every 5 seconds
 
+// Use pins 2 and 3 for software serial debugging
+SoftwareSerial debugSerial(2, 3); // RX, TX
+
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(9600);  // XBee communication
+  debugSerial.begin(9600);  // Debug output
   delay(1000);  // Add a 1-second delay for XBee initialization
   xbee.setSerial(Serial);
   
-  Serial.println("Arduino XBee Router - Enhanced Debugging");
-  Serial.println("Coordinator Address: 0x0013A200 0x409F7067");
+  debugSerial.println("Arduino XBee Router - Enhanced Debugging");
+  debugSerial.println("Coordinator Address: 0x0013A200 0x409F7067");
 }
 
-bool sendMessage(String message, int retries = 0) {
+bool sendMessage(String message) {
   uint8_t payload[message.length() + 1];
   message.toCharArray((char*)payload, sizeof(payload));
   
   ZBTxRequest zbTx = ZBTxRequest(coordinatorAddress, payload, sizeof(payload) - 1);
   xbee.send(zbTx);
   
-  Serial.print("Sending to Coordinator: ");
-  Serial.println(message);
-  Serial.print("Payload size: ");
-  Serial.println(sizeof(payload) - 1);
+  debugSerial.print("Sending to Coordinator: ");
+  debugSerial.println(message);
+  debugSerial.print("Payload size: ");
+  debugSerial.println(sizeof(payload) - 1);
   
-  // Get the status of the transmission
-  ZBTxStatusResponse txStatus;
-  if (xbee.readPacket(10000)) { // Increased timeout to 10 seconds
+  // Wait for and parse the TX status response
+  if (xbee.readPacket(5000)) {
     if (xbee.getResponse().getApiId() == ZB_TX_STATUS_RESPONSE) {
+      ZBTxStatusResponse txStatus;
       xbee.getResponse().getZBTxStatusResponse(txStatus);
       if (txStatus.getDeliveryStatus() == SUCCESS) {
-        Serial.println("Message sent successfully!");
+        debugSerial.println("Message sent successfully!");
         return true;
       } else {
-        Serial.print("Message send failed. Status code: 0x");
-        Serial.println(txStatus.getDeliveryStatus(), HEX);
-        
-        if (retries < maxRetries) {
-          Serial.println("Retrying...");
-          delay(1000); // Wait a second before retrying
-          return sendMessage(message, retries + 1);
-        }
+        debugSerial.print("Message send failed. Status code: 0x");
+        debugSerial.println(txStatus.getDeliveryStatus(), HEX);
+        return false;
       }
-    } else {
-      Serial.print("Unexpected API frame received. API ID: 0x");
-      Serial.println(xbee.getResponse().getApiId(), HEX);
     }
+  } else if (xbee.getResponse().isError()) {
+    debugSerial.print("Error reading packet. Error code: ");
+    debugSerial.println(xbee.getResponse().getErrorCode());
+    return false;
   } else {
-    Serial.println("No transmission status received. XBee might not be in API mode.");
+    debugSerial.println("No response received");
+    return false;
   }
-  return false;
 }
 
 void receiveMessage() {
   xbee.readPacket(100);  // Read for 100ms
   
   if (xbee.getResponse().isAvailable()) {
-    Serial.print("Received API frame. API ID: 0x");
-    Serial.println(xbee.getResponse().getApiId(), HEX);
+    uint8_t apiId = xbee.getResponse().getApiId();
+    debugSerial.print("Received API frame. API ID: 0x");
+    debugSerial.println(apiId, HEX);
     
-    if (xbee.getResponse().getApiId() == ZB_RX_RESPONSE) {
+    if (apiId == ZB_RX_RESPONSE) {
       ZBRxResponse rx;
       xbee.getResponse().getZBRxResponse(rx);
       
@@ -80,41 +81,45 @@ void receiveMessage() {
       message[dataLength] = '\0';
       String messageStr = String(message);
       
-      Serial.print("Received from Coordinator: ");
-      Serial.println(messageStr);
+      debugSerial.print("Received from Coordinator: ");
+      debugSerial.println(messageStr);
 
       if (messageStr == "Contact confirmed") {
         contactEstablished = true;
-        Serial.println("Contact established. Waiting for start command.");
+        debugSerial.println("Contact established. Waiting for start command.");
       } else if (messageStr == "pause") {
         isDataSendingActive = false;
-        Serial.println("Data sending paused");
+        debugSerial.println("Data sending paused");
       } else if (messageStr == "start") {
         isDataSendingActive = true;
-        Serial.println("Data sending started");
+        debugSerial.println("Data sending started");
       } else if (messageStr == "heartbeat") {
-        Serial.println("Heartbeat received");
+        debugSerial.println("Heartbeat received");
         sendMessage("heartbeat_ack");  // Acknowledge the heartbeat
       }
       
-      Serial.print("Current status - Contact Established: ");
-      Serial.print(contactEstablished);
-      Serial.print(", Data Sending Active: ");
-      Serial.println(isDataSendingActive);
-    } else {
-      Serial.print("Unexpected API frame received. API ID: 0x");
-      Serial.println(xbee.getResponse().getApiId(), HEX);
+      debugSerial.print("Current status - Contact Established: ");
+      debugSerial.print(contactEstablished);
+      debugSerial.print(", Data Sending Active: ");
+      debugSerial.println(isDataSendingActive);
     }
+    else {
+      debugSerial.print("Unhandled API ID: 0x");
+      debugSerial.println(apiId, HEX);
+    }
+  } else if (xbee.getResponse().isError()) {
+    debugSerial.print("Error reading packet. Error code: ");
+    debugSerial.println(xbee.getResponse().getErrorCode());
   }
 }
 
 void attemptInitialContact() {
   if (!contactEstablished && millis() - lastInitialContactAttempt >= initialContactInterval) {
-    Serial.println("Attempting initial contact...");
+    debugSerial.println("Attempting initial contact...");
     if (sendMessage("Initial contact")) {
-      Serial.println("Initial contact message sent successfully. Waiting for confirmation...");
+      debugSerial.println("Initial contact message sent. Waiting for confirmation...");
     } else {
-      Serial.println("Failed to send initial contact after multiple retries. Will try again later.");
+      debugSerial.println("Failed to send initial contact message. Will retry.");
     }
     lastInitialContactAttempt = millis();
   }
@@ -123,35 +128,33 @@ void attemptInitialContact() {
 void printStatus() {
   unsigned long currentMillis = millis();
   if (currentMillis - lastStatusPrint >= statusPrintInterval) {
-    Serial.println("--- Current Status ---");
-    Serial.print("Contact Established: ");
-    Serial.println(contactEstablished ? "Yes" : "No");
-    Serial.print("Data Sending Active: ");
-    Serial.println(isDataSendingActive ? "Yes" : "No");
-    Serial.println("----------------------");
+    debugSerial.println("--- Current Status ---");
+    debugSerial.print("Contact Established: ");
+    debugSerial.println(contactEstablished ? "Yes" : "No");
+    debugSerial.print("Data Sending Active: ");
+    debugSerial.println(isDataSendingActive ? "Yes" : "No");
+    debugSerial.println("----------------------");
     lastStatusPrint = currentMillis;
   }
 }
 
 void loop() {
+  unsigned long currentMillis = millis();
+  
   if (!contactEstablished) {
     attemptInitialContact();
-  } else if (isDataSendingActive) {
-    unsigned long currentMillis = millis();
+  } 
+  
+  if (isDataSendingActive && contactEstablished) {
     if (currentMillis - lastSendTime >= sendInterval) {
-      Serial.println("Attempting to send data...");
-      if (sendMessage("data")) {
-        lastSendTime = currentMillis;
-        Serial.println("Data sent successfully");
-      } else {
-        Serial.println("Failed to send data. Will retry on next interval.");
-      }
+      debugSerial.println("Attempting to send data...");
+      sendMessage("data");
+      lastSendTime = currentMillis;
     }
-  } else {
-    Serial.println("Contact established but data sending is not active. Waiting for start command.");
-    delay(1000);  // Wait for 1 second before checking again
   }
+
   receiveMessage();
   printStatus();
-  delay(10);  // Add a small delay to prevent flooding the serial port
+  
+  delay(10);  // Small delay to prevent flooding the serial port
 }
